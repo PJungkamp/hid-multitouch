@@ -1,0 +1,8 @@
+hid-multitouch.o
+hid-multitouch.ko
+hid-multitouch.mod
+hid-multitouch.mod.c
+hid-multitouch.mod.o
+modules.order
+Module.symvers
+.*
