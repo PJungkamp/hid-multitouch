@@ -85,7 +85,7 @@ MODULE_LICENSE("GPL");
 
 #define MS_TYPE_COVER_FEATURE_REPORT_USAGE	0xff050086
 #define MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE	0xff050072
-#define MS_TYPE_COVER_TABLET_MODE_SWITCH_APPLICATION	0xff050050
+#define MS_TYPE_COVER_APPLICATION	0xff050050
 
 enum latency_mode {
 	HID_LATENCY_NORMAL = 0,
@@ -1393,7 +1393,7 @@ static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	 * tablet mode switch
 	 * On a vendor specific usage page with vendor specific usage
 	 */
-	if (field->application == MS_TYPE_COVER_TABLET_MODE_SWITCH_APPLICATION &&
+	if (field->application == MS_TYPE_COVER_APPLICATION &&
 		application->quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH &&
 		usage->hid == MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE) {
 		usage->type = EV_SW;
@@ -1437,7 +1437,7 @@ static int mt_input_mapped(struct hid_device *hdev, struct hid_input *hi,
 	 * tablet mode switch
 	 * On a vendor specific usage page with vendor specific usage
 	 */
-	if (field->application == MS_TYPE_COVER_TABLET_MODE_SWITCH_APPLICATION &&
+	if (field->application == MS_TYPE_COVER_APPLICATION &&
 		rdata->application->quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH &&
 		usage->hid == MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE) {
         input = hi->input;
@@ -1461,7 +1461,7 @@ static int mt_event(struct hid_device *hid, struct hid_field *field,
 	if (rdata && rdata->is_mt_collection)
 		return mt_touch_event(hid, field, usage, value);
 
-	if (field->application == MS_TYPE_COVER_TABLET_MODE_SWITCH_APPLICATION &&
+	if (field->application == MS_TYPE_COVER_APPLICATION &&
 		rdata->application->quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH &&
 		usage->hid == MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE) {
     	input = field->hidinput->input;
@@ -1762,28 +1762,26 @@ static void mt_expired_timeout(struct timer_list *t)
 	clear_bit(MT_IO_FLAGS_RUNNING, &td->mt_io_flags);
 }
 
-static void get_type_cover_backlight_field(struct hid_device *hdev,
-					   struct hid_field **field)
+static int get_type_cover_field(struct hid_report_enum *rep_enum,
+					   struct hid_field **field, int usage)
 {
-	struct hid_report_enum *rep_enum;
 	struct hid_report *rep;
 	struct hid_field *cur_field;
 	int i, j;
 
-	rep_enum = &hdev->report_enum[HID_FEATURE_REPORT];
 	list_for_each_entry(rep, &rep_enum->report_list, list) {
 		for (i = 0; i < rep->maxfield; i++) {
 			cur_field = rep->field[i];
-
-			for (j = 0; j < cur_field->maxusage; j++) {
-				if (cur_field->usage[j].hid
-				    == MS_TYPE_COVER_FEATURE_REPORT_USAGE) {
-					*field = cur_field;
-					return;
-				}
-			}
+            if (cur_field->application == MS_TYPE_COVER_APPLICATION)
+    			for (j = 0; j < cur_field->maxusage; j++) {
+    				if (cur_field->usage[j].hid == usage) {
+    					*field = cur_field;
+    					return true;
+    				}
+    			}
 		}
 	}
+	return false;
 }
 
 static void update_keyboard_backlight(struct hid_device *hdev, bool enabled)
@@ -1794,8 +1792,10 @@ static void update_keyboard_backlight(struct hid_device *hdev, bool enabled)
 	/* Wake up the device in case it's already suspended */
 	pm_runtime_get_sync(&udev->dev);
 
-	get_type_cover_backlight_field(hdev, &field);
-	if (!field) {
+	if(!get_type_cover_field(
+    	&hdev->report_enum[HID_FEATURE_REPORT],
+    	&field,
+    	MS_TYPE_COVER_FEATURE_REPORT_USAGE)) {
 		hid_err(hdev, "couldn't find backlight field\n");
 		goto out;
 	}
@@ -1921,13 +1921,32 @@ static int mt_suspend(struct hid_device *hdev, pm_message_t state)
 
 static int mt_reset_resume(struct hid_device *hdev)
 {
+	struct mt_device *td = hid_get_drvdata(hdev);
+	struct hid_field *field;
+
 	mt_release_contacts(hdev);
 	mt_set_modes(hdev, HID_LATENCY_NORMAL, true, true);
+
+	/* Request an update on the typecover folding state on resume
+     * after reset. */
+	if (td->mtclass.quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH) {
+    	if (get_type_cover_field(
+        	&hdev->report_enum[HID_INPUT_REPORT],
+        	&field,
+        	MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE)) {
+            hid_hw_request(hdev,field->report,HID_REQ_GET_REPORT);
+    	} else {
+    		hid_err(hdev, "couldn't find tablet mode field\n");
+    	}
+	}
 	return 0;
 }
 
 static int mt_resume(struct hid_device *hdev)
 {
+	struct mt_device *td = hid_get_drvdata(hdev);
+	struct hid_field *field;
+
 	/* Some Elan legacy devices require SET_IDLE to be set on resume.
 	 * It should be safe to send it to other devices too.
 	 * Tested on 3M, Stantum, Cypress, Zytronic, eGalax, and Elan panels. */
@@ -1936,6 +1955,19 @@ static int mt_resume(struct hid_device *hdev)
 
 	mt_set_modes(hdev, HID_LATENCY_NORMAL, true, true);
 
+	/* Request an update on the typecover folding state on resume
+     * after reset. */
+	if (td->mtclass.quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH) {
+    	if (get_type_cover_field(
+        	&hdev->report_enum[HID_INPUT_REPORT],
+        	&field,
+        	MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE)) {
+            hid_hw_request(hdev,field->report,HID_REQ_GET_REPORT);
+    	} else {
+    		hid_err(hdev, "couldn't find tablet mode field\n");
+    	}
+	}
+
 	return 0;
 }
 #endif
@@ -1943,6 +1975,22 @@ static int mt_resume(struct hid_device *hdev)
 static void mt_remove(struct hid_device *hdev)
 {
 	struct mt_device *td = hid_get_drvdata(hdev);
+	struct hid_field *field;
+	struct input_dev *input;
+
+    /* reset tablet mode switch on disconnect */
+	if (td->mtclass.quirks & MT_QUIRK_HAS_TYPE_COVER_TABLET_MODE_SWITCH) {
+    	if (get_type_cover_field(
+        	&hdev->report_enum[HID_INPUT_REPORT],
+        	&field,
+        	MS_TYPE_COVER_TABLET_MODE_SWITCH_USAGE)) {
+        	input = field->hidinput->input;
+        	input_report_switch(input,SW_TABLET_MODE,0);
+        	input_sync(input);
+    	} else {
+    		hid_err(hdev, "couldn't find tablet mode field\n");
+    	}
+	}
 
 	unregister_pm_notifier(&td->pm_notifier);
 	del_timer_sync(&td->release_timer);
